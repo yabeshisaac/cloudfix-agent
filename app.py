@@ -1,431 +1,418 @@
 """
-CloudFix Web UI
+CloudFix Web Interface
 
 Run:
     python app.py
 
-Then open:
-    http://localhost:5000
+Open:
+    http://127.0.0.1:5000
 """
 
-from flask import Flask, render_template_string, request
+import re
+import threading
 
+from flask import Flask, render_template_string, request
+import markdown as md
 from agent import build_agent
 
 
 app = Flask(__name__)
 
-# Build the Strands agent once when the application starts.
+# Build the Strands agent once when Flask starts.
 agent = build_agent()
+
+# Only one diagnosis runs at a time. A lock (not a fresh agent per
+# request) avoids Strands' internal event-loop teardown/rebuild issues
+# while still preventing "Agent is already processing a request" crashes.
+agent_lock = threading.Lock()
+
+
+# =========================================================
+# Output cleanup
+# =========================================================
+#
+# The local model (Qwen 7B) sometimes narrates a fake tool call after
+# the real recommended policy -- and the exact shape of that fake text
+# varies run to run, so pattern-matching specific fake-text shapes is
+# not reliable long-term.
+#
+# Instead: truncate the response structurally, right after the first
+# JSON code block that follows "RECOMMENDED FIX". CloudFix's own format
+# (EVIDENCE / ROOT CAUSE / RECOMMENDED FIX + one policy block) is fixed
+# by the system prompt, so anything after that policy block is discarded
+# unconditionally -- regardless of what it says.
+
+def truncate_after_recommended_fix(text: str) -> str:
+
+    marker = re.search(r"RECOMMENDED FIX", text, re.IGNORECASE)
+
+    if not marker:
+        return text.strip()
+
+    after_marker = text[marker.start():]
+
+    code_block = re.search(r"```.*?```", after_marker, re.DOTALL)
+
+    if not code_block:
+        return text.strip()
+
+    cutoff = marker.start() + code_block.end()
+
+    return text[:cutoff].strip()
 
 
 PAGE = """
-<!doctype html>
-
+<!DOCTYPE html>
 <html lang="en">
 
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<meta charset="utf-8">
+    <title>CloudFix</title>
 
-<meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
 
-<title>CloudFix — AWS Troubleshooting Agent</title>
+        * {
+            box-sizing: border-box;
+        }
 
-<style>
+        body {
+            margin: 0;
+            background: #ffffff;
+            color: #202123;
+            font-family:
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                Arial,
+                sans-serif;
+        }
 
-* {
-    box-sizing: border-box;
-}
+        .container {
+            width: 92%;
+            max-width: 820px;
+            margin: 0 auto;
+        }
 
-body {
 
-    margin: 0;
+        /* HEADER */
 
-    font-family:
-        Inter,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        sans-serif;
+        header {
+            height: 64px;
+            border-bottom: 1px solid #e5e5e5;
 
-    background: #0d1117;
+            display: flex;
+            align-items: center;
+        }
 
-    color: #e6edf3;
-}
+        .header-content {
+            width: 92%;
+            max-width: 1100px;
+            margin: auto;
 
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
 
-/* --------------------------------------------------
-   Header
--------------------------------------------------- */
+        .logo {
+            font-size: 21px;
+            font-weight: 650;
+        }
 
-header {
+        .status {
+            font-size: 12px;
+            color: #6b7280;
+        }
 
-    border-bottom: 1px solid #21262d;
 
-    background: #161b22;
+        /* HERO */
 
-    padding: 18px 0;
-}
+        .hero {
+            text-align: center;
+            padding: 75px 20px 45px;
+        }
 
-.header-content {
+        .hero h1 {
+            font-size: 36px;
+            margin: 0 0 14px;
+            letter-spacing: -0.5px;
+        }
 
-    max-width: 900px;
+        .hero p {
+            margin: auto;
+            max-width: 620px;
 
-    margin: auto;
+            color: #6b7280;
+            font-size: 16px;
+            line-height: 1.6;
+        }
 
-    padding: 0 24px;
+        .hero .timing-note {
+            margin: 10px auto 0;
+            max-width: 620px;
 
-    display: flex;
+            color: #9ca3af;
+            font-size: 13px;
+        }
 
-    align-items: center;
 
-    justify-content: space-between;
-}
+        /* INPUT */
 
-.logo {
+        .input-card {
+            border: 1px solid #d9d9d9;
+            border-radius: 16px;
+            padding: 14px;
 
-    font-size: 24px;
+            background: #ffffff;
 
-    font-weight: 700;
+            box-shadow:
+                0 2px 8px rgba(0, 0, 0, 0.05);
+        }
 
-    letter-spacing: -0.5px;
-}
+        textarea {
+            width: 100%;
+            min-height: 105px;
 
-.logo span {
+            border: none;
+            outline: none;
+            resize: vertical;
 
-    color: #58a6ff;
-}
+            padding: 7px;
 
-.badge {
+            background: transparent;
+            color: #202123;
 
-    background: #1f6feb22;
+            font-family: inherit;
+            font-size: 16px;
+            line-height: 1.5;
+        }
 
-    color: #58a6ff;
+        textarea::placeholder {
+            color: #9ca3af;
+        }
 
-    border: 1px solid #1f6feb;
 
-    padding: 5px 10px;
+        /* BUTTON AREA */
 
-    border-radius: 20px;
+        .actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 8px;
+        }
 
-    font-size: 12px;
-}
+        button {
+            border: none;
+            border-radius: 9px;
 
+            background: #202123;
+            color: white;
 
-/* --------------------------------------------------
-   Main container
--------------------------------------------------- */
+            padding: 10px 18px;
 
-.container {
+            font-size: 14px;
+            font-weight: 600;
 
-    max-width: 900px;
+            cursor: pointer;
+        }
 
-    margin: 55px auto;
+        button:hover {
+            background: #343541;
+        }
 
-    padding: 0 24px;
-}
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
 
 
-/* --------------------------------------------------
-   Hero
--------------------------------------------------- */
+        /* LOADING */
 
-.hero {
+        .loading {
+            display: none;
 
-    text-align: center;
+            margin-top: 20px;
+            padding: 16px 18px;
 
-    margin-bottom: 40px;
-}
+            border: 1px solid #e5e5e5;
+            border-radius: 12px;
 
-.hero h1 {
+            color: #555;
+            font-size: 14px;
 
-    font-size: 38px;
+            background: #fafafa;
+        }
 
-    margin-bottom: 10px;
-}
+        .loading .loading-sub {
+            margin-top: 6px;
+            margin-left: 23px;
 
-.hero p {
+            color: #9ca3af;
+            font-size: 12.5px;
+        }
 
-    color: #8b949e;
+        .spinner {
+            display: inline-block;
 
-    font-size: 17px;
+            width: 14px;
+            height: 14px;
 
-    line-height: 1.6;
+            margin-right: 9px;
 
-    max-width: 650px;
+            border: 2px solid #ddd;
+            border-top-color: #202123;
+            border-radius: 50%;
 
-    margin: auto;
-}
+            vertical-align: -2px;
 
+            animation: spin 0.8s linear infinite;
+        }
 
-/* --------------------------------------------------
-   Main card
--------------------------------------------------- */
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
 
-.card {
 
-    background: #161b22;
+        /* RESULT */
 
-    border: 1px solid #30363d;
+        .result {
+            margin-top: 35px;
+        }
 
-    border-radius: 12px;
+        .result-header {
+            font-size: 15px;
+            font-weight: 650;
 
-    padding: 26px;
+            margin-bottom: 12px;
+        }
 
-    box-shadow: 0 10px 30px rgba(0,0,0,.25);
-}
+        /* Rendered markdown diagnosis output */
 
-.label {
+        .markdown-body {
+            background: #f7f7f8;
+            border: 1px solid #e5e5e5;
+            border-radius: 12px;
+            padding: 22px 26px;
 
-    font-size: 14px;
+            color: #292929;
+            font-size: 14.5px;
+            line-height: 1.7;
+        }
 
-    font-weight: 600;
+        .markdown-body h1,
+        .markdown-body h2,
+        .markdown-body h3 {
+            margin: 18px 0 8px;
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            color: #111827;
+        }
 
-    margin-bottom: 10px;
+        .markdown-body h1:first-child,
+        .markdown-body h2:first-child,
+        .markdown-body h3:first-child {
+            margin-top: 0;
+        }
 
-    display: block;
-}
+        .markdown-body p {
+            margin: 8px 0;
+        }
 
+        .markdown-body ul,
+        .markdown-body ol {
+            margin: 8px 0;
+            padding-left: 22px;
+        }
 
-/* --------------------------------------------------
-   Input
--------------------------------------------------- */
+        .markdown-body li {
+            margin: 4px 0;
+        }
 
-textarea {
+        .markdown-body strong {
+            color: #111827;
+            font-weight: 700;
+        }
 
-    width: 100%;
+        .markdown-body code {
+            background: #ececee;
+            border-radius: 4px;
+            padding: 1px 5px;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 13px;
+        }
 
-    resize: vertical;
+        .markdown-body pre {
+            background: #1e1e1e;
+            color: #e5e5e5;
+            border-radius: 10px;
+            padding: 16px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
 
-    min-height: 110px;
+        .markdown-body pre code {
+            background: none;
+            color: inherit;
+            padding: 0;
+            font-size: 13px;
+        }
 
-    padding: 15px;
+        .error {
+            background: #fff7f7;
+            border-color: #efcaca;
+        }
 
-    font-family: inherit;
 
-    font-size: 15px;
+        /* INFO */
 
-    line-height: 1.5;
+        .info {
+            display: flex;
+            justify-content: center;
+            gap: 24px;
 
-    background: #0d1117;
+            margin: 32px 0 70px;
 
-    color: #e6edf3;
+            color: #8a8a8a;
+            font-size: 12px;
+        }
 
-    border: 1px solid #30363d;
 
-    border-radius: 8px;
+        /* FOOTER */
 
-    outline: none;
-}
+        footer {
+            text-align: center;
 
-textarea:focus {
+            border-top: 1px solid #eeeeee;
 
-    border-color: #58a6ff;
+            padding: 22px;
 
-    box-shadow: 0 0 0 3px rgba(88,166,255,.12);
-}
+            color: #999;
+            font-size: 12px;
+        }
 
 
-/* --------------------------------------------------
-   Button
--------------------------------------------------- */
+        @media (max-width: 650px) {
 
-button {
+            .hero {
+                padding-top: 50px;
+            }
 
-    width: 100%;
+            .hero h1 {
+                font-size: 29px;
+            }
 
-    margin-top: 14px;
+            .info {
+                flex-direction: column;
+                align-items: center;
+                gap: 8px;
+            }
+        }
 
-    padding: 13px;
-
-    border: none;
-
-    border-radius: 8px;
-
-    background: #238636;
-
-    color: white;
-
-    font-size: 15px;
-
-    font-weight: 600;
-
-    cursor: pointer;
-
-    transition: .15s;
-}
-
-button:hover {
-
-    background: #2ea043;
-}
-
-
-/* --------------------------------------------------
-   Example
--------------------------------------------------- */
-
-.example {
-
-    margin-top: 14px;
-
-    color: #8b949e;
-
-    font-size: 13px;
-
-    line-height: 1.5;
-}
-
-.example code {
-
-    color: #79c0ff;
-}
-
-
-/* --------------------------------------------------
-   Diagnosis
--------------------------------------------------- */
-
-.result {
-
-    margin-top: 30px;
-
-    background: #161b22;
-
-    border: 1px solid #30363d;
-
-    border-radius: 12px;
-
-    overflow: hidden;
-}
-
-.result-header {
-
-    padding: 15px 20px;
-
-    border-bottom: 1px solid #30363d;
-
-    font-weight: 600;
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 8px;
-}
-
-.status {
-
-    width: 9px;
-
-    height: 9px;
-
-    background: #3fb950;
-
-    border-radius: 50%;
-}
-
-pre {
-
-    margin: 0;
-
-    padding: 22px;
-
-    background: #0d1117;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: anywhere;
-
-    font-family:
-        "SFMono-Regular",
-        Consolas,
-        "Liberation Mono",
-        monospace;
-
-    font-size: 14px;
-
-    line-height: 1.65;
-
-    color: #c9d1d9;
-}
-
-
-/* --------------------------------------------------
-   Features
--------------------------------------------------- */
-
-.features {
-
-    display: grid;
-
-    grid-template-columns: repeat(3, 1fr);
-
-    gap: 14px;
-
-    margin-top: 28px;
-}
-
-.feature {
-
-    border: 1px solid #21262d;
-
-    border-radius: 8px;
-
-    padding: 15px;
-
-    text-align: center;
-
-    color: #8b949e;
-
-    font-size: 13px;
-}
-
-.feature strong {
-
-    display: block;
-
-    color: #e6edf3;
-
-    margin-bottom: 5px;
-}
-
-
-/* --------------------------------------------------
-   Footer
--------------------------------------------------- */
-
-footer {
-
-    text-align: center;
-
-    color: #484f58;
-
-    font-size: 12px;
-
-    margin-top: 40px;
-}
-
-
-/* --------------------------------------------------
-   Mobile
--------------------------------------------------- */
-
-@media (max-width: 650px) {
-
-    .features {
-
-        grid-template-columns: 1fr;
-    }
-
-    .hero h1 {
-
-        font-size: 30px;
-    }
-}
-
-</style>
+    </style>
 
 </head>
 
@@ -435,138 +422,163 @@ footer {
 
 <header>
 
-<div class="header-content">
+    <div class="header-content">
 
-<div class="logo">
+        <div class="logo">
+            CloudFix
+        </div>
 
-Cloud<span>Fix</span>
+        <div class="status">
+            Read-only AWS troubleshooting
+        </div>
 
-</div>
-
-<div class="badge">
-
-READ-ONLY AWS ACCESS
-
-</div>
-
-</div>
+    </div>
 
 </header>
 
 
-<div class="container">
+<main class="container">
 
 
-<div class="hero">
+    <section class="hero">
 
-<h1>AWS access troubleshooting, powered by evidence.</h1>
+        <h1>
+            How can CloudFix help?
+        </h1>
 
-<p>
+        <p>
+            Describe an Amazon S3 or IAM access problem.
+            CloudFix will inspect your actual AWS configuration,
+            identify the likely root cause, and recommend a
+            least-privilege fix.
+        </p>
 
-CloudFix is an AI troubleshooting agent that inspects your
-actual AWS S3 and IAM configuration, identifies the likely
-root cause of access failures, and recommends a
-least-privilege fix.
+        <p class="timing-note">
+            Runs on a local AI model — diagnosis may take up to 3 minutes.
+        </p>
 
-</p>
-
-</div>
-
-
-<div class="card">
-
-<form method="post">
-
-<label class="label">
-
-Describe the AWS access problem
-
-</label>
-
-<textarea
-name="question"
-placeholder="Why can't cloudfix-demo-user download files from cloudfix-demo-bucket?"
-required>{{ question or '' }}</textarea>
-
-<button type="submit">
-
-Diagnose AWS Configuration
-
-</button>
-
-</form>
+    </section>
 
 
-<div class="example">
+    <form
+        method="POST"
+        id="diagnosisForm"
+        class="input-card"
+    >
 
-Example:
-<code>
-Why can't cloudfix-demo-user access cloudfix-demo-bucket-yabesh?
-</code>
-
-</div>
-
-</div>
-
-
-{% if answer %}
-
-<div class="result">
-
-<div class="result-header">
-
-<div class="status"></div>
-
-CloudFix Diagnosis
-
-</div>
-
-<pre>{{ answer }}</pre>
-
-</div>
-
-{% endif %}
+        <textarea
+            name="question"
+            required
+            placeholder="Why can't cloudfix-demo-user download files from cloudfix-demo-bucket-yabesh?"
+        >{{ question or '' }}</textarea>
 
 
-<div class="features">
+        <div class="actions">
 
-<div class="feature">
+            <button
+                type="submit"
+                id="diagnoseButton"
+            >
+                Diagnose
+            </button>
 
-<strong>Real AWS Evidence</strong>
+        </div>
 
-Inspects actual S3 and IAM configuration through boto3.
-
-</div>
-
-
-<div class="feature">
-
-<strong>Agentic Diagnosis</strong>
-
-Strands decides which tools to invoke based on the problem.
-
-</div>
+    </form>
 
 
-<div class="feature">
+    <div
+        class="loading"
+        id="loadingMessage"
+    >
 
-<strong>Human-in-the-loop</strong>
+        <span class="spinner"></span>
 
-CloudFix recommends fixes but never modifies your AWS account.
+        CloudFix is inspecting your AWS environment...
 
-</div>
+        <div class="loading-sub">
+            This may take up to 3 minutes — please don't refresh or click Diagnose again.
+        </div>
 
-</div>
+    </div>
+
+
+    {% if answer %}
+
+    <section class="result">
+
+        <div class="result-header">
+            CloudFix Diagnosis
+        </div>
+
+        <div class="markdown-body">{{ answer|safe }}</div>
+
+    </section>
+
+    {% endif %}
+
+
+    {% if error %}
+
+    <section class="result">
+
+        <div class="result-header">
+            CloudFix encountered an error
+        </div>
+
+        <pre class="error">{{ error }}</pre>
+
+    </section>
+
+    {% endif %}
+
+
+    <div class="info">
+
+        <span>Strands Agents SDK</span>
+
+        <span>Real AWS evidence</span>
+
+        <span>Human-reviewed fixes</span>
+
+    </div>
+
+
+</main>
 
 
 <footer>
-
-CloudFix · Strands Agents SDK · boto3 · AWS S3 · AWS IAM
-
+    CloudFix · AWS S3 & IAM Troubleshooting Agent
 </footer>
 
 
-</div>
+<script>
+
+    const form =
+        document.getElementById("diagnosisForm");
+
+    const button =
+        document.getElementById("diagnoseButton");
+
+    const loading =
+        document.getElementById("loadingMessage");
+
+
+    form.addEventListener(
+        "submit",
+        function () {
+
+            button.disabled = true;
+
+            button.textContent =
+                "Diagnosing...";
+
+            loading.style.display =
+                "block";
+        }
+    );
+
+</script>
 
 
 </body>
@@ -579,6 +591,7 @@ CloudFix · Strands Agents SDK · boto3 · AWS S3 · AWS IAM
 def index():
 
     answer = None
+    error = None
     question = ""
 
     if request.method == "POST":
@@ -590,30 +603,53 @@ def index():
 
         if question:
 
-            try:
+            if not agent_lock.acquire(blocking=False):
 
-                result = agent(question)
-
-                answer = str(result)
-
-            except Exception as exc:
-
-                answer = (
-                    "CloudFix could not complete the diagnosis.\\n\\n"
-                    f"Error: {exc}"
+                error = (
+                    "CloudFix is still working on a previous request. "
+                    "Please wait for it to finish before trying again."
                 )
+
+            else:
+
+                try:
+
+                    result = agent(question)
+
+                    cleaned = truncate_after_recommended_fix(
+                        str(result)
+                    )
+
+                    answer = md.markdown(
+                        cleaned,
+                        extensions=["fenced_code"],
+                    )
+
+                except Exception as exc:
+
+                    error = str(exc)
+
+                finally:
+
+                    agent_lock.release()
 
     return render_template_string(
         PAGE,
         answer=answer,
+        error=error,
         question=question,
     )
 
 
 if __name__ == "__main__":
 
+    print()
+    print("CloudFix Web Interface")
+    print("Open http://127.0.0.1:5000")
+    print()
+
     app.run(
         host="127.0.0.1",
         port=5000,
-        debug=True,
+        debug=False,
     )
