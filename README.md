@@ -8,7 +8,7 @@ suggests a fix. Read-only -- it never modifies AWS resources.
 
 Built for the AWS "Agents for Humans" Hackathon -- **Professional Agents** track.
 
-![CloudFix Architecture](./architecture.png)
+![CloudFix Architecture](./Architecture%20Digaram.png)
 
 ## The Problem
 
@@ -31,7 +31,7 @@ and tells you exactly what's missing -- with a ready-to-review policy fix.
 - `app.py` -- minimal Flask web UI wrapping the agent
 - `cloudfix-readonly-policy.json` -- IAM policy to attach to CloudFix's own
   credentials, scoped to only what it needs
-- `architecture.png` -- architecture diagram
+- `Architecture Digaram.png` -- architecture diagram
 
 ## How It Works
 
