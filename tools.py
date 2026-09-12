@@ -1,14 +1,9 @@
 """
 CloudFix tools.
 
-Each function is decorated with @tool so the Strands agent can call it
-autonomously.
-
-Every AWS inspection tool is READ-ONLY. These tools never create, modify,
-or delete AWS resources.
-
-All inspection tools return plain dictionaries and surface AWS errors to
-the agent so CloudFix can use those errors as part of its diagnosis.
+AWS inspection tools are read-only.
+They inspect S3 and IAM configuration and return evidence
+to the Strands agent.
 """
 
 import json
@@ -19,77 +14,53 @@ from botocore.exceptions import ClientError
 from strands import tool
 
 
-# ---------------------------------------------------------
-# boto3 session
-# ---------------------------------------------------------
-
-# boto3 resolves credentials using the normal AWS credential chain:
-# environment variables, ~/.aws/credentials, IAM role, profile, etc.
 _session = boto3.Session()
 
 
 def _client(service):
-    """Return a boto3 client using the shared session."""
     return _session.client(service)
 
 
 def _safe_call(fn, **kwargs):
     """
-    Execute a boto3 API call safely.
-
-    Returns:
-        (result, None) on success
-
-        (None, error_dict) on failure
-
-    Errors are returned instead of raised so the Strands agent can
-    reason about failures such as AccessDenied or NoSuchEntity.
+    Execute an AWS API call safely and return:
+        (response, None)
+    or:
+        (None, error_dictionary)
     """
 
     try:
         return fn(**kwargs), None
 
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "Unknown")
-        message = e.response.get("Error", {}).get("Message", str(e))
+    except ClientError as exc:
+        error = exc.response.get("Error", {})
 
         return None, {
-            "code": code,
-            "message": message,
+            "code": error.get("Code", "Unknown"),
+            "message": error.get("Message", str(exc)),
         }
 
-    except Exception as e:
+    except Exception as exc:
         return None, {
             "code": "UnexpectedError",
-            "message": str(e),
+            "message": str(exc),
         }
 
 
-# ---------------------------------------------------------
-# Managed policy helper
-# ---------------------------------------------------------
-
-def _get_policy_document(iam, policy_arn: str):
+def _get_policy_document(iam, policy_arn):
     """
-    Fetch the default version document of an IAM managed policy.
-
-    Used for:
-    - User attached managed policies
-    - Group attached managed policies
-    - Permissions boundaries
+    Retrieve the default version document of an IAM managed policy.
     """
 
-    meta, err = _safe_call(
+    metadata, err = _safe_call(
         iam.get_policy,
         PolicyArn=policy_arn,
     )
 
-    if err or not meta:
-        return {
-            "error": err
-        }
+    if err or not metadata:
+        return {"error": err}
 
-    version_id = meta["Policy"]["DefaultVersionId"]
+    version_id = metadata["Policy"]["DefaultVersionId"]
 
     version, err = _safe_call(
         iam.get_policy_version,
@@ -98,13 +69,10 @@ def _get_policy_document(iam, policy_arn: str):
     )
 
     if err or not version:
-        return {
-            "error": err
-        }
+        return {"error": err}
 
     document = version["PolicyVersion"]["Document"]
 
-    # Some policy documents may arrive URL encoded.
     if isinstance(document, str):
         try:
             document = json.loads(
@@ -116,29 +84,30 @@ def _get_policy_document(iam, policy_arn: str):
     return document
 
 
-# ---------------------------------------------------------
-# S3 inspection
-# ---------------------------------------------------------
+# =========================================================
+# S3 INSPECTION
+# =========================================================
 
 @tool
 def inspect_bucket(bucket_name: str) -> dict:
     """
-    Inspect an S3 bucket's configuration relevant to access troubleshooting.
+    Inspect an S3 bucket for configuration relevant to
+    access troubleshooting.
 
     Checks:
 
     - Bucket existence
-    - Bucket region
-    - S3 Block Public Access
+    - Region
+    - Block Public Access
     - Bucket policy
     - Bucket policy status
     - Server-side encryption
     - Object ownership controls
 
-    This tool is READ-ONLY.
+    READ-ONLY.
 
     Args:
-        bucket_name: Name of the S3 bucket to inspect.
+        bucket_name: Name of the S3 bucket.
     """
 
     s3 = _client("s3")
@@ -164,7 +133,7 @@ def inspect_bucket(bucket_name: str) -> dict:
     result["exists"] = True
 
     # -----------------------------------------------------
-    # Bucket region
+    # Region
     # -----------------------------------------------------
 
     location, err = _safe_call(
@@ -176,7 +145,6 @@ def inspect_bucket(bucket_name: str) -> dict:
         result["region"] = None
         result["region_error"] = err
     else:
-        # AWS returns None for us-east-1.
         result["region"] = (
             location.get("LocationConstraint")
             or "us-east-1"
@@ -194,7 +162,6 @@ def inspect_bucket(bucket_name: str) -> dict:
     if err:
         result["public_access_block"] = None
         result["public_access_block_error"] = err
-
     else:
         result["public_access_block"] = (
             public_access.get(
@@ -220,14 +187,13 @@ def inspect_bucket(bucket_name: str) -> dict:
             result["bucket_policy"] = json.loads(
                 policy["Policy"]
             )
-
         except (KeyError, json.JSONDecodeError):
             result["bucket_policy"] = policy.get(
                 "Policy"
             )
 
     # -----------------------------------------------------
-    # Bucket policy public status
+    # Bucket policy status
     # -----------------------------------------------------
 
     policy_status, err = _safe_call(
@@ -238,7 +204,6 @@ def inspect_bucket(bucket_name: str) -> dict:
     if err:
         result["policy_status"] = None
         result["policy_status_error"] = err
-
     else:
         result["policy_status"] = (
             policy_status.get("PolicyStatus")
@@ -256,7 +221,6 @@ def inspect_bucket(bucket_name: str) -> dict:
     if err:
         result["encryption"] = None
         result["encryption_error"] = err
-
     else:
         result["encryption"] = (
             encryption.get(
@@ -265,7 +229,7 @@ def inspect_bucket(bucket_name: str) -> dict:
         )
 
     # -----------------------------------------------------
-    # Ownership controls
+    # Object ownership
     # -----------------------------------------------------
 
     ownership, err = _safe_call(
@@ -276,7 +240,6 @@ def inspect_bucket(bucket_name: str) -> dict:
     if err:
         result["ownership_controls"] = None
         result["ownership_controls_error"] = err
-
     else:
         result["ownership_controls"] = (
             ownership.get("OwnershipControls")
@@ -285,9 +248,9 @@ def inspect_bucket(bucket_name: str) -> dict:
     return result
 
 
-# ---------------------------------------------------------
-# IAM inspection
-# ---------------------------------------------------------
+# =========================================================
+# IAM INSPECTION
+# =========================================================
 
 @tool
 def inspect_iam_user(user_name: str) -> dict:
@@ -300,16 +263,16 @@ def inspect_iam_user(user_name: str) -> dict:
     - Attached managed policies
     - Managed policy documents
     - Inline user policies
-    - Group memberships
+    - IAM group memberships
     - Group managed policies
     - Group inline policies
     - Permissions boundary
     - Permissions boundary policy document
 
-    This tool is READ-ONLY.
+    READ-ONLY.
 
     Args:
-        user_name: IAM user name to inspect.
+        user_name: IAM user name.
     """
 
     iam = _client("iam")
@@ -319,7 +282,7 @@ def inspect_iam_user(user_name: str) -> dict:
     }
 
     # -----------------------------------------------------
-    # User existence
+    # IAM user
     # -----------------------------------------------------
 
     user_response, err = _safe_call(
@@ -362,7 +325,7 @@ def inspect_iam_user(user_name: str) -> dict:
         result["permissions_boundary"] = None
 
     # -----------------------------------------------------
-    # Attached managed user policies
+    # Attached user managed policies
     # -----------------------------------------------------
 
     attached, err = _safe_call(
@@ -371,7 +334,9 @@ def inspect_iam_user(user_name: str) -> dict:
     )
 
     if err:
-        result["attached_managed_policies_error"] = err
+        result[
+            "attached_managed_policies_error"
+        ] = err
 
     managed_policies = []
 
@@ -379,22 +344,20 @@ def inspect_iam_user(user_name: str) -> dict:
         attached or {}
     ).get("AttachedPolicies", []):
 
-        policy_document = _get_policy_document(
+        document = _get_policy_document(
             iam,
             policy["PolicyArn"],
         )
 
-        managed_policies.append(
-            {
-                "name": policy["PolicyName"],
-                "arn": policy["PolicyArn"],
-                "document": policy_document,
-            }
-        )
+        managed_policies.append({
+            "name": policy["PolicyName"],
+            "arn": policy["PolicyArn"],
+            "document": document,
+        })
 
-    result["attached_managed_policies"] = (
-        managed_policies
-    )
+    result[
+        "attached_managed_policies"
+    ] = managed_policies
 
     # -----------------------------------------------------
     # Inline user policies
@@ -421,22 +384,18 @@ def inspect_iam_user(user_name: str) -> dict:
         )
 
         if policy:
-            inline_policies.append(
-                {
-                    "name": policy_name,
-                    "document": policy.get(
-                        "PolicyDocument"
-                    ),
-                }
-            )
+            inline_policies.append({
+                "name": policy_name,
+                "document": policy.get(
+                    "PolicyDocument"
+                ),
+            })
 
         elif policy_err:
-            inline_policies.append(
-                {
-                    "name": policy_name,
-                    "error": policy_err,
-                }
-            )
+            inline_policies.append({
+                "name": policy_name,
+                "error": policy_err,
+            })
 
     result["inline_policies"] = inline_policies
 
@@ -460,13 +419,13 @@ def inspect_iam_user(user_name: str) -> dict:
 
         group_name = group["GroupName"]
 
-        # ---------------------------------------------
-        # Managed policies attached to group
-        # ---------------------------------------------
+        # Group managed policies
 
-        group_attached, group_attached_err = _safe_call(
-            iam.list_attached_group_policies,
-            GroupName=group_name,
+        group_attached, group_attached_err = (
+            _safe_call(
+                iam.list_attached_group_policies,
+                GroupName=group_name,
+            )
         )
 
         group_managed = []
@@ -475,26 +434,24 @@ def inspect_iam_user(user_name: str) -> dict:
             group_attached or {}
         ).get("AttachedPolicies", []):
 
-            policy_document = _get_policy_document(
+            document = _get_policy_document(
                 iam,
                 policy["PolicyArn"],
             )
 
-            group_managed.append(
-                {
-                    "name": policy["PolicyName"],
-                    "arn": policy["PolicyArn"],
-                    "document": policy_document,
-                }
+            group_managed.append({
+                "name": policy["PolicyName"],
+                "arn": policy["PolicyArn"],
+                "document": document,
+            })
+
+        # Group inline policies
+
+        group_inline_names, group_inline_err = (
+            _safe_call(
+                iam.list_group_policies,
+                GroupName=group_name,
             )
-
-        # ---------------------------------------------
-        # Inline group policies
-        # ---------------------------------------------
-
-        group_inline_names, group_inline_err = _safe_call(
-            iam.list_group_policies,
-            GroupName=group_name,
         )
 
         group_inline = []
@@ -510,27 +467,25 @@ def inspect_iam_user(user_name: str) -> dict:
             )
 
             if policy:
-                group_inline.append(
-                    {
-                        "name": policy_name,
-                        "document": policy.get(
-                            "PolicyDocument"
-                        ),
-                    }
-                )
+                group_inline.append({
+                    "name": policy_name,
+                    "document": policy.get(
+                        "PolicyDocument"
+                    ),
+                })
 
             elif policy_err:
-                group_inline.append(
-                    {
-                        "name": policy_name,
-                        "error": policy_err,
-                    }
-                )
+                group_inline.append({
+                    "name": policy_name,
+                    "error": policy_err,
+                })
 
         group_result = {
             "group_name": group_name,
-            "attached_managed_policies": group_managed,
-            "inline_policies": group_inline,
+            "attached_managed_policies":
+                group_managed,
+            "inline_policies":
+                group_inline,
         }
 
         if group_attached_err:
@@ -550,24 +505,28 @@ def inspect_iam_user(user_name: str) -> dict:
     return result
 
 
-# ---------------------------------------------------------
-# Policy recommendation
-# ---------------------------------------------------------
+# =========================================================
+# POLICY RECOMMENDATION
+# =========================================================
 
 @tool
 def suggest_policy_fix(
-    missing_actions: list,
+    missing_actions: list[str],
     bucket_name: str,
     resource_scope: str = "auto",
 ) -> dict:
     """
-    Generate a least-privilege example IAM policy for missing S3 permissions.
+    Generate a least-privilege example IAM policy for
+    missing S3 permissions.
 
     IMPORTANT:
-    This tool only generates policy JSON.
-    It NEVER applies the policy to AWS.
 
-    S3 permissions require different resource scopes.
+    This function ONLY generates JSON.
+
+    It does NOT attach or modify any IAM policy.
+
+    S3 bucket-level and object-level permissions require
+    different resource ARNs.
 
     Example:
 
@@ -579,16 +538,14 @@ def suggest_policy_fix(
 
     Args:
         missing_actions:
-            Missing S3 actions such as:
-            ["s3:ListBucket", "s3:GetObject"]
+            Missing S3 actions.
 
         bucket_name:
-            Name of the affected S3 bucket.
+            Name of the affected bucket.
 
         resource_scope:
-            Kept for tool compatibility.
-            CloudFix automatically chooses the appropriate
-            resource ARN based on each S3 action.
+            Retained for compatibility.
+            Automatic resource mapping is preferred.
     """
 
     bucket_arn = (
@@ -599,7 +556,7 @@ def suggest_policy_fix(
         f"arn:aws:s3:::{bucket_name}/*"
     )
 
-    # Common bucket-level S3 actions.
+    # Common S3 bucket-level actions.
     bucket_actions = {
         "s3:ListBucket",
         "s3:ListBucketVersions",
@@ -612,49 +569,39 @@ def suggest_policy_fix(
     bucket_level_actions = []
     object_level_actions = []
 
-    # -----------------------------------------------------
-    # Separate bucket-level and object-level actions
-    # -----------------------------------------------------
-
     for action in missing_actions:
 
         if action in bucket_actions:
-            bucket_level_actions.append(action)
+            bucket_level_actions.append(
+                action
+            )
 
         else:
-            object_level_actions.append(action)
+            object_level_actions.append(
+                action
+            )
 
     statements = []
 
-    # -----------------------------------------------------
     # Bucket-level statement
-    # -----------------------------------------------------
-
     if bucket_level_actions:
 
-        statements.append(
-            {
-                "Sid": "CloudFixBucketPermissions",
-                "Effect": "Allow",
-                "Action": bucket_level_actions,
-                "Resource": bucket_arn,
-            }
-        )
+        statements.append({
+            "Sid": "CloudFixBucketPermissions",
+            "Effect": "Allow",
+            "Action": bucket_level_actions,
+            "Resource": bucket_arn,
+        })
 
-    # -----------------------------------------------------
     # Object-level statement
-    # -----------------------------------------------------
-
     if object_level_actions:
 
-        statements.append(
-            {
-                "Sid": "CloudFixObjectPermissions",
-                "Effect": "Allow",
-                "Action": object_level_actions,
-                "Resource": object_arn,
-            }
-        )
+        statements.append({
+            "Sid": "CloudFixObjectPermissions",
+            "Effect": "Allow",
+            "Action": object_level_actions,
+            "Resource": object_arn,
+        })
 
     policy = {
         "Version": "2012-10-17",
