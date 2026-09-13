@@ -1,148 +1,400 @@
 # CloudFix
 
-AI-powered AWS S3/IAM troubleshooting agent built with the [Strands Agents
-SDK](https://strandsagents.com/) + a local LLM via [Ollama](https://ollama.com) + boto3.
-Describe an access problem in plain English; CloudFix inspects your actual
-bucket and IAM configuration, reasons about the likely root cause, and
-suggests a fix. Read-only -- it never modifies AWS resources.
+CloudFix is an AI-powered, read-only AWS S3/IAM troubleshooting agent built with the [Strands Agents SDK](https://strandsagents.com/), a local LLM through [Ollama](https://ollama.com), and boto3.
 
-Built for the AWS "Agents for Humans" Hackathon -- **Professional Agents** track.
+Describe an AWS access problem in plain English, and CloudFix inspects the actual AWS configuration, analyzes the evidence, identifies the likely root cause, and recommends a least-privilege fix.
+
+CloudFix never modifies AWS resources. All recommended changes are presented for human review.
+
+Built for the AWS **Agents for Humans Hackathon** — **Professional Agents** track.
 
 ![CloudFix Architecture](./Architecture%20Digaram.png)
 
 ## The Problem
 
-"Why can't this user access that bucket?" is one of the most common -- and
-most time-consuming -- troubleshooting tasks in AWS. The answer could be a
-missing IAM action, an explicit Deny, a misconfigured bucket policy, a
-permissions boundary, or any of a dozen other things. Engineers usually
-resolve this by manually digging through IAM console tabs and
-cross-referencing policies by hand.
+AWS S3 and IAM access issues can be surprisingly time-consuming to troubleshoot.
 
-CloudFix automates that investigation. It inspects the real bucket and the
-real IAM user, reasons over the evidence like an experienced engineer would,
-and tells you exactly what's missing -- with a ready-to-review policy fix.
+A simple question such as:
 
-## Files
+> Why can't this IAM user download files from this S3 bucket?
 
-- `tools.py` -- boto3-backed, read-only inspection tools (`inspect_bucket`,
-  `inspect_iam_user`, `suggest_policy_fix`)
-- `agent.py` -- Strands `Agent` wiring + CLI entry point
-- `app.py` -- minimal Flask web UI wrapping the agent
-- `cloudfix-readonly-policy.json` -- IAM policy to attach to CloudFix's own
-  credentials, scoped to only what it needs
-- `Architecture Digaram.png` -- architecture diagram
+may require manually checking:
+
+- IAM inline policies
+- Attached managed policies
+- IAM group policies
+- Permissions boundaries
+- S3 bucket policies
+- S3 resource ARNs
+- Block Public Access settings
+- Encryption configuration
+
+CloudFix automates this investigation.
+
+Instead of manually navigating multiple AWS console pages and comparing policies, an engineer can describe the problem in plain English and let CloudFix inspect the relevant AWS configuration.
+
+CloudFix then returns a structured diagnosis:
+
+**Evidence → Root Cause → Recommended Fix**
 
 ## How It Works
 
-CloudFix is a Strands Agent with three read-only tools:
+```text
+User
+  ↓
+Flask Web UI
+  ↓
+Strands Agents SDK
+  ↓
+Local LLM (Ollama / Qwen2.5:7b)
+  ↓
+CloudFix inspection tools
+  ↓
+boto3 read-only AWS APIs
+  ↓
+Amazon S3 + AWS IAM
 
-1. **`inspect_bucket`** -- bucket existence/region, Block Public Access,
-   encryption config, bucket policy, ownership controls.
-2. **`inspect_iam_user`** -- attached managed policies (with full policy
-   documents), inline policies, group memberships/policies, and any
-   permissions boundary.
-3. **`suggest_policy_fix`** -- generates an example IAM policy JSON snippet
-   scoped to the exact missing actions and bucket. Never applies anything.
+Response:
+Evidence → Root Cause → Recommended Fix
+```
 
-The agent's system prompt walks it through a structured diagnostic
-checklist: explicit Allow, explicit Deny (overrides Allow), bucket policy,
-permissions boundary, and whether resource ARNs actually match the bucket
-in question.
+CloudFix uses the Strands Agents SDK to reason about the user's request and inspect the relevant AWS configuration.
 
-**CloudFix never modifies AWS resources.** Every tool call is a
-`Get*`/`List*`/`Describe*` API. Suggested fixes are for human review, never
-auto-applied.
+The current MVP focuses specifically on **Amazon S3 and AWS IAM access troubleshooting**.
+
+## CloudFix Capabilities
+
+### S3 Inspection
+
+CloudFix can inspect:
+
+- Bucket existence and Region
+- S3 Block Public Access configuration
+- Bucket policy
+- Server-side encryption configuration
+- Ownership controls
+
+### IAM Inspection
+
+CloudFix can inspect:
+
+- IAM user information
+- Attached managed policies
+- Managed policy documents
+- Inline policies
+- IAM group memberships
+- Group policies
+- Permissions boundaries
+
+### Policy Recommendation
+
+After analyzing the evidence, CloudFix can recommend a least-privilege IAM policy for the missing S3 permissions.
+
+The recommendation is only displayed to the user.
+
+**CloudFix never applies the policy automatically.**
+
+## Diagnostic Reasoning
+
+CloudFix evaluates several common causes of S3 access failures, including:
+
+- Missing IAM Allow permissions
+- Explicit Deny statements
+- Incorrect S3 resource ARNs
+- Bucket policy restrictions
+- Permissions boundaries
+- S3 Block Public Access when relevant
+- Encryption configuration when relevant
+
+For example:
+
+Bucket-level actions such as:
+
+```text
+s3:ListBucket
+```
+
+normally use:
+
+```text
+arn:aws:s3:::bucket-name
+```
+
+Object-level actions such as:
+
+```text
+s3:GetObject
+s3:PutObject
+s3:DeleteObject
+```
+
+normally use:
+
+```text
+arn:aws:s3:::bucket-name/*
+```
+
+This allows CloudFix to detect situations where the correct action exists but is scoped to the wrong AWS resource.
+
+## Example Demo
+
+The included demo intentionally creates an IAM permission problem.
+
+The IAM user:
+
+```text
+cloudfix-demo-user
+```
+
+has permission to list the demo S3 bucket:
+
+```text
+s3:ListBucket
+```
+
+but does not have:
+
+```text
+s3:GetObject
+```
+
+The user asks CloudFix:
+
+```text
+Why can't cloudfix-demo-user download files from cloudfix-demo-bucket-yabesh?
+```
+
+CloudFix inspects the real IAM user and S3 bucket through boto3.
+
+It then returns:
+
+### EVIDENCE
+
+The relevant IAM policies, permissions boundary information, and S3 bucket configuration discovered from AWS.
+
+### ROOT CAUSE
+
+The IAM user can list the bucket but does not have the required `s3:GetObject` permission for objects in the bucket.
+
+### RECOMMENDED FIX
+
+A least-privilege IAM policy granting the required object-level permission for the specific S3 bucket.
+
+The recommendation is shown for human review and is never automatically applied.
+
+## Safety
+
+CloudFix is intentionally **read-only**.
+
+It does not:
+
+- Create AWS resources
+- Delete AWS resources
+- Modify AWS resources
+- Attach IAM policies
+- Modify IAM policies
+- Change S3 bucket policies
+- Change permissions
+- Automatically apply recommended fixes
+
+AWS inspection is performed using read-only API operations such as:
+
+```text
+Get*
+List*
+Describe*
+```
+
+Policy recommendations are generated as text/JSON for human review.
+
+CloudFix's own AWS credentials can also be restricted using:
+
+```text
+cloudfix-readonly-policy.json
+```
+
+This provides an additional AWS-level safety boundary.
 
 ## Tech Stack
 
-- [Strands Agents SDK](https://strandsagents.com/) -- agent orchestration and tool-calling
-- **Ollama** -- local LLM inference (no external API cost, runs fully
-  offline once the model is pulled)
-- **boto3** -- read-only AWS API access (S3 + IAM)
-- **Flask** -- lightweight web UI
+- **Strands Agents SDK 1.55.1** — agent orchestration and tool use
+- **Ollama 0.34.0** — local LLM runtime
+- **Qwen2.5:7b** — local reasoning model
+- **boto3 1.43.91** — AWS SDK for Python
+- **Flask** — lightweight web interface
+- **Python 3.13.15**
 
-> **Why local instead of Bedrock?** Bedrock model invocation was blocked at
-> the AWS account level for this project (`ValidationException: Operation
-> not allowed`, reproducible even in the Bedrock console Playground with
-> full admin permissions -- an account-level restriction, not a code or IAM
-> issue). Strands' model-provider abstraction meant switching to Ollama
-> required no changes to the agent's tools or reasoning logic, only the
-> model provider in `agent.py`.
+## Project Files
+
+```text
+cloudfix-agent/
+│
+├── agent.py
+├── app.py
+├── tools.py
+├── cloudfix-readonly-policy.json
+├── requirements.txt
+├── Architecture Digaram.png
+├── README.md
+└── LICENSE
+```
+
+### `agent.py`
+
+Contains the Strands Agent configuration, local Ollama model configuration, system prompt, diagnostic reasoning instructions, and CLI interface.
+
+### `tools.py`
+
+Contains the boto3-backed AWS inspection functionality for Amazon S3 and AWS IAM, together with policy recommendation support.
+
+### `app.py`
+
+Provides the Flask web interface used to submit troubleshooting questions and display CloudFix diagnoses.
+
+### `cloudfix-readonly-policy.json`
+
+Example IAM policy for restricting CloudFix's AWS credentials to the read-only permissions required for inspection.
 
 ## Setup
 
 ### Prerequisites
-- Python 3.11+
-- [Ollama](https://ollama.com) installed and running
-- AWS credentials configured (`aws configure`) with read-only S3/IAM
-  permissions -- see [`cloudfix-readonly-policy.json`](./cloudfix-readonly-policy.json)
 
-### Installation
+Install:
+
+- Python 3.11+
+- Ollama
+- AWS CLI / configured AWS credentials
+
+Clone the repository and open the project directory.
+
+### Create a virtual environment
 
 ```bash
 python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+```
+
+Windows:
+
+```bash
+venv\Scripts\activate
+```
+
+Linux/macOS:
+
+```bash
+source venv/bin/activate
+```
+
+### Install dependencies
+
+```bash
 pip install -r requirements.txt
 pip install "strands-agents[ollama]"
 ```
 
-### Pull the local model
+### Pull the model
 
 ```bash
-ollama pull llama3.1
+ollama pull qwen2.5:7b
 ```
 
-### AWS credentials
+Verify:
+
+```bash
+ollama list
+```
+
+### Configure AWS credentials
 
 ```bash
 aws configure
 ```
 
-Attach `cloudfix-readonly-policy.json` to the IAM user/role CloudFix runs
-as (separate from the demo IAM user you're diagnosing -- CloudFix's own
-credentials need read access to inspect things; the demo user is the one
-with the intentionally-broken policy).
+CloudFix should run using AWS credentials with only the read permissions required to inspect S3 and IAM.
 
-## Step-by-step build order
+See:
 
-1. **Test `tools.py` standalone first:**
-```bash
-   python -c "from tools import inspect_bucket; import json; print(json.dumps(inspect_bucket('your-bucket-name'), indent=2, default=str))"
+```text
+cloudfix-readonly-policy.json
 ```
-2. **Run the agent from the CLI:**
+
+The credentials used by CloudFix are separate from the IAM user being diagnosed in the demo.
+
+## Run CloudFix
+
+### CLI
+
 ```bash
-   python agent.py "Why can't test-user access my-bucket?"
+python agent.py
 ```
-3. **Only once step 2 works**, start the Flask UI:
+
+Or provide a question directly:
+
 ```bash
-   python app.py
+python agent.py "Why can't cloudfix-demo-user download files from cloudfix-demo-bucket-yabesh?"
 ```
-   Open http://localhost:5000
 
-## Demo scenario
+### Web Interface
 
-1. Create bucket `cloudfix-demo-bucket` and IAM user `cloudfix-demo-user`.
-2. Attach a policy to `cloudfix-demo-user` that grants `s3:ListBucket` but
-   *omits* `s3:GetObject`.
-3. Ask CloudFix: `Why can't cloudfix-demo-user download files from
-   cloudfix-demo-bucket?`
-4. Expected: CloudFix inspects both, identifies the missing `s3:GetObject`
-   permission, explains it plainly, and calls `suggest_policy_fix` to
-   generate the corrected policy JSON.
+Start Flask:
 
-## What's intentionally NOT in the MVP
+```bash
+python app.py
+```
 
-EC2/security groups, VPC/networking, RDS connectivity, Lambda permissions,
-KMS, CloudTrail, CloudWatch logs, cross-account access.
+Then open:
 
-## Safety
+```text
+http://127.0.0.1:5000
+```
 
-All tools are read-only (`Get*`/`List*`/`Describe*` boto3 calls only).
-`suggest_policy_fix` only returns JSON text -- it never calls an IAM
-`Put*`/`Attach*` API. Scope CloudFix's own credentials to
-`cloudfix-readonly-policy.json` so this is enforced at the AWS level too,
-not just in the agent's code.
+Enter an S3/IAM access problem and select **Diagnose**.
+
+CloudFix will inspect the relevant AWS configuration and return its diagnosis.
+
+## Why a Local Model?
+
+CloudFix currently uses Ollama with `qwen2.5:7b`.
+
+During development, Amazon Bedrock model invocation was unavailable for the AWS account used for the project. Because Strands Agents supports different model providers, CloudFix could continue using the same agent architecture and AWS inspection workflow while using a local model.
+
+The model provider is therefore separate from CloudFix's AWS inspection tools and diagnostic workflow.
+
+## Current MVP Scope
+
+CloudFix currently focuses on:
+
+- Amazon S3
+- AWS IAM
+- S3/IAM access troubleshooting
+- Evidence-based diagnosis
+- Least-privilege policy recommendations
+- Human-reviewed remediation
+
+The following are intentionally outside the current MVP:
+
+- EC2 security groups
+- VPC networking
+- RDS connectivity
+- Lambda permissions
+- Cross-account troubleshooting
+- CloudTrail analysis
+- CloudWatch log analysis
+- Automatic remediation
+
+These would be natural areas for future expansion.
+
+## Hackathon Track
+
+**AWS Agents for Humans Hackathon**
+
+Track:
+
+**Professional Agents**
+
+CloudFix is designed for cloud engineers, developers, DevOps engineers, and other AWS users who repeatedly troubleshoot access and permissions problems.
+
+The goal is to turn a repetitive, judgment-heavy troubleshooting workflow into a simple question while keeping the final remediation under human control.
 
 ## License
 
