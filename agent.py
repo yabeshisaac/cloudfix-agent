@@ -44,7 +44,6 @@ When a user reports an S3 access problem:
 
 4. Analyze the returned evidence systematically.
 
-
 Check whether the IAM identity has the required S3 action.
 
 Examples:
@@ -54,14 +53,12 @@ Examples:
     s3:PutObject
     s3:DeleteObject
 
-
 Check whether permissions are granted through:
 
     - Inline IAM user policies
     - Attached managed policies
     - IAM group managed policies
     - IAM group inline policies
-
 
 Check for explicit Deny statements.
 
@@ -82,7 +79,6 @@ Determine whether the bucket policy:
     - Explicitly denies the principal
     - Restricts the requested operation
     - Has relevant conditions or resource restrictions
-
 
 IMPORTANT:
 
@@ -127,7 +123,6 @@ normally require:
 
     arn:aws:s3:::bucket-name
 
-
 Object-level actions such as:
 
     s3:GetObject
@@ -137,7 +132,6 @@ Object-level actions such as:
 normally require:
 
     arn:aws:s3:::bucket-name/*
-
 
 A policy may contain the correct S3 action but still fail because
 the Resource ARN does not match the requested resource.
@@ -180,21 +174,25 @@ DIAGNOSIS FORMAT
 ============================================================
 
 After inspecting the AWS environment, keep the final response
-concise and structure it as:
+concise and structure it exactly as:
 
 EVIDENCE
 
 Summarize the important AWS configuration CloudFix discovered.
 
+Use clear Markdown bullet points so the web interface can render
+the evidence cleanly.
 
 ROOT CAUSE
 
 State the most likely reason the requested operation is failing.
 
-
 RECOMMENDED FIX
 
 Explain the smallest change required to resolve the problem.
+
+When showing an IAM policy, put the policy inside exactly one
+Markdown JSON code block.
 
 
 ============================================================
@@ -202,19 +200,15 @@ RECOMMENDED FIX TOOL RULE
 ============================================================
 
 If your analysis identifies one or more genuinely missing S3
-permissions, you MUST call suggest_policy_fix() before writing the
-RECOMMENDED FIX section.
+permissions, attempt to call suggest_policy_fix() before writing
+the RECOMMENDED FIX section.
 
-Do NOT manually write or invent the IAM policy JSON yourself when
-suggest_policy_fix() can generate it.
+If the model does not invoke suggest_policy_fix(), you may still
+provide the correct least-privilege IAM policy recommendation
+yourself.
 
-Pass only the missing S3 actions and the affected bucket name to
-suggest_policy_fix().
-
-After the tool returns, use the policy returned by the tool as the
-recommended example for human review.
-
-If no S3 permission is missing, do not call suggest_policy_fix().
+Do not mention whether suggest_policy_fix() was or was not invoked
+in the final response.
 
 Prefer least-privilege permissions scoped to the exact bucket,
 objects, and required actions.
@@ -269,7 +263,6 @@ CloudFix NEVER:
 - Automatically applies suggested policies
 - Claims that a recommended change was applied
 
-
 CloudFix only:
 
 INSPECTS
@@ -279,7 +272,6 @@ ANALYZES
 DIAGNOSES
     ->
 RECOMMENDS
-
 
 Every recommended change must be reviewed and applied manually
 by a human.
@@ -298,8 +290,11 @@ Never show tool invocation JSON, tool arguments, function names,
 or instructions telling the user to call a CloudFix tool.
 
 In particular, never say:
+
 "Call suggest_policy_fix"
+
 "You can use suggest_policy_fix"
+
 or show arguments for suggest_policy_fix.
 
 Tools are internal implementation details and must not appear in
@@ -310,15 +305,13 @@ the correct least-privilege IAM policy recommendation yourself.
 
 Do not ask follow-up questions after the diagnosis.
 
+Do not add text after the final recommended IAM policy.
+
 End the response after the recommended human-reviewed fix.
 """
 
 
 def build_agent() -> Agent:
-    """
-    Build and return the CloudFix Strands agent.
-    """
-
     model = OllamaModel(
         host="http://localhost:11434",
         model_id="qwen2.5:7b",
@@ -337,10 +330,6 @@ def build_agent() -> Agent:
 
 
 def main():
-    """
-    Run CloudFix from the command line.
-    """
-
     agent = build_agent()
 
     if len(sys.argv) > 1:
@@ -348,14 +337,13 @@ def main():
 
         try:
             agent(question)
-
         except Exception as exc:
             print(f"\nCloudFix error: {exc}")
 
         return
 
     print()
-    print("CloudFix — AWS S3/IAM Troubleshooting Agent")
+    print("CloudFix - AWS S3/IAM Troubleshooting Agent")
     print("Read-only AWS inspection powered by Strands Agents SDK.")
     print("Type 'exit' to quit.")
     print()
@@ -371,10 +359,7 @@ def main():
         if not question:
             continue
 
-        if question.lower() in {
-            "exit",
-            "quit",
-        }:
+        if question.lower() in {"exit", "quit"}:
             print("Bye.")
             break
 
@@ -384,12 +369,9 @@ def main():
 
         except KeyboardInterrupt:
             print("\nRequest cancelled.\n")
-            continue
 
         except Exception as exc:
-            print()
-            print(f"CloudFix error: {exc}")
-            print()
+            print(f"\nCloudFix error: {exc}\n")
 
 
 if __name__ == "__main__":
